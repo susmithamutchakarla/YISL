@@ -1,500 +1,986 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="utf-8">
-    <title>Deep Ocean VR Experience - Meta Quest</title>
-    <meta name="description" content="Immersive WebXR scuba diving simulation using A-Frame">
-    
-    <!-- A-Frame and Extras -->
-    <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/gh/c-frame/aframe-extras@7.2.0/dist/aframe-extras.min.js"></script>
+  <meta charset="utf-8">
+  <title>Deep Ocean VR — Scuba Diving Simulation</title>
+  <meta name="description" content="Immersive WebXR scuba diving simulation for Meta Quest 3S — A-Frame powered">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
 
-    <style>
-        body, html { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; background-color: #000; }
-        
-        #start-overlay {
-            position: absolute; left: 0; top: 0; right: 0; bottom: 0;
-            background: linear-gradient(135deg, #001f3f, #000000);
-            display: flex; flex-direction: column; justify-content: center; align-items: center;
-            color: #fff; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            z-index: 9999; text-align: center;
+  <!-- A-Frame core -->
+  <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+  <!-- A-Frame extras for movement-controls -->
+  <script src="https://cdn.jsdelivr.net/gh/c-frame/aframe-extras@7.5.0/dist/aframe-extras.min.js"></script>
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+
+    /* ── Start Overlay ── */
+    #start-overlay {
+      position: fixed; inset: 0; z-index: 10000;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      background: linear-gradient(180deg, #000a14 0%, #001830 40%, #002244 100%);
+      font-family: 'Segoe UI', system-ui, sans-serif; color: #fff;
+      text-align: center; padding: 20px;
+    }
+    #start-overlay h1 {
+      font-size: clamp(2rem, 5vw, 3.5rem); font-weight: 700;
+      background: linear-gradient(135deg, #00d4ff, #0088ff, #00ffcc);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      margin-bottom: 8px;
+    }
+    #start-overlay .subtitle { color: #7ec8e3; font-size: 1.1rem; margin-bottom: 24px; }
+
+    .controls-box {
+      background: rgba(0, 40, 80, 0.6); border: 1px solid rgba(0, 180, 255, 0.25);
+      border-radius: 12px; padding: 18px 24px; max-width: 520px; width: 100%;
+      text-align: left; font-size: 0.95rem; line-height: 1.7; color: #b3ddf0;
+      backdrop-filter: blur(6px);
+    }
+    .controls-box strong { color: #00d4ff; display: block; margin-bottom: 6px; font-size: 1rem; }
+    .controls-box span { color: #fff; font-weight: 600; }
+
+    #start-btn {
+      margin-top: 28px; padding: 14px 48px; font-size: 1.35rem; font-weight: 600;
+      border: none; border-radius: 50px; cursor: pointer; color: #fff;
+      background: linear-gradient(135deg, #0077cc, #00bbff);
+      box-shadow: 0 0 30px rgba(0, 170, 255, 0.35);
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    #start-btn:hover { transform: scale(1.06); box-shadow: 0 0 45px rgba(0, 170, 255, 0.6); }
+  </style>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       ALL A-FRAME COMPONENTS — registered before <a-scene> is parsed
+       ════════════════════════════════════════════════════════════════════ -->
+  <script>
+  /* ───────────────────────────────────────────────────────────────────
+     1.  DIVE AUDIO SYSTEM
+         Procedural Web Audio: ambient noise, depth low-pass, heartbeat,
+         bubble bursts, and oxygen-warning beep.
+     ─────────────────────────────────────────────────────────────────── */
+  AFRAME.registerSystem('dive-audio', {
+    init () {
+      this.ctx        = null;   // AudioContext — created on user gesture
+      this.lpFilter   = null;   // low-pass that deepens with depth
+      this.heartGain  = null;   // heartbeat volume node
+      this.bubbleGain = null;   // bubble burst volume node
+      this.warnOsc    = null;   // oxygen-warning oscillator
+      this.warnGain   = null;
+      this._bubbleCd  = 0;      // cooldown timer for bubbles
+    },
+
+    /** Call once from a user-gesture handler (click / trigger) */
+    start () {
+      if (this.ctx) return;
+      const AC = window.AudioContext || window.webkitAudioContext;
+      const ctx = this.ctx = new AC();
+
+      /* — Ambient underwater noise (filtered white noise) — */
+      const len    = ctx.sampleRate * 2;
+      const buf    = ctx.createBuffer(2, len, ctx.sampleRate);
+      for (let ch = 0; ch < 2; ch++) {
+        const d = buf.getChannelData(ch);
+        for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+      }
+      const noise = ctx.createBufferSource();
+      noise.buffer = buf; noise.loop = true;
+
+      this.lpFilter = ctx.createBiquadFilter();
+      this.lpFilter.type = 'lowpass';
+      this.lpFilter.frequency.value = 650;
+      this.lpFilter.Q.value = 1;
+
+      const ambGain = ctx.createGain();
+      ambGain.gain.value = 0.18;
+
+      noise.connect(this.lpFilter);
+      this.lpFilter.connect(ambGain);
+      ambGain.connect(ctx.destination);
+      noise.start();
+
+      /* — Heartbeat (sub-bass sine, gated) — */
+      const heartOsc = ctx.createOscillator();
+      heartOsc.type = 'sine'; heartOsc.frequency.value = 42;
+      this.heartGain = ctx.createGain();
+      this.heartGain.gain.value = 0;
+      heartOsc.connect(this.heartGain);
+      this.heartGain.connect(ctx.destination);
+      heartOsc.start();
+
+      /* — Bubble burst channel — */
+      this.bubbleGain = ctx.createGain();
+      this.bubbleGain.gain.value = 0;
+      this.bubbleGain.connect(ctx.destination);
+
+      /* — Oxygen warning beep — */
+      this.warnOsc = ctx.createOscillator();
+      this.warnOsc.type = 'square'; this.warnOsc.frequency.value = 880;
+      this.warnGain = ctx.createGain(); this.warnGain.gain.value = 0;
+      this.warnOsc.connect(this.warnGain);
+      this.warnGain.connect(ctx.destination);
+      this.warnOsc.start();
+    },
+
+    /** Called every frame by dive-manager with 0..1 depth factor */
+    updateDepth (factor) {
+      if (!this.lpFilter) return;
+      // Muffled audio at depth: 650Hz → 120Hz
+      this.lpFilter.frequency.value = 650 - factor * 530;
+
+      // Heartbeat kicks in past 65 % depth
+      if (factor > 0.65) {
+        const ms = Date.now() % 900;
+        const beat = (ms < 100 || (ms > 200 && ms < 300)) ? 1 : 0;
+        this.heartGain.gain.value = beat * (factor - 0.65) * 2.8;
+      } else {
+        this.heartGain.gain.value = 0;
+      }
+    },
+
+    /** Trigger a short bubble pop (called when player is moving) */
+    bubble () {
+      if (!this.ctx || Date.now() < this._bubbleCd) return;
+      this._bubbleCd = Date.now() + 200;
+
+      const ctx = this.ctx;
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(600 + Math.random() * 800, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(100, ctx.currentTime + 0.15);
+
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.08, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.18);
+
+      osc.connect(g); g.connect(ctx.destination);
+      osc.start(); osc.stop(ctx.currentTime + 0.2);
+    },
+
+    /** Oxygen warning beep (on/off) */
+    setWarning (on) {
+      if (!this.warnGain) return;
+      if (on) {
+        const t = Date.now() % 1200;
+        this.warnGain.gain.value = t < 300 ? 0.12 : 0;
+      } else {
+        this.warnGain.gain.value = 0;
+      }
+    }
+  });
+
+  /* ───────────────────────────────────────────────────────────────────
+     2.  DIVE MANAGER
+         Master component on <a-scene>: manages oxygen, depth, lighting,
+         fog colour, vignette, HUD text, and day/night cycle.
+     ─────────────────────────────────────────────────────────────────── */
+  AFRAME.registerComponent('dive-manager', {
+    init () {
+      this.oxygen      = 100;
+      this.dayPhase    = 0;          // 0..2π — drives day/night
+      this.dayCycleDur = 240;        // seconds per full cycle
+
+      // Cache DOM refs
+      this.rig          = document.getElementById('rig');
+      this.ambLight     = document.getElementById('ambient-light');
+      this.sunLight     = document.getElementById('sun-light');
+      this.skyEl        = document.getElementById('sky');
+      this.oxyText      = document.getElementById('hud-oxy-text');
+      this.oxyBar       = document.getElementById('hud-oxy-bar');
+      this.depthText    = document.getElementById('hud-depth-text');
+      this.vignetteEl   = document.getElementById('vignette-ring');
+      this.scoreText    = document.getElementById('hud-score-text');
+      this.score        = 0;
+    },
+
+    addScore (pts) {
+      this.score += pts;
+      if (this.scoreText) this.scoreText.setAttribute('value', 'ITEMS: ' + this.score);
+    },
+
+    tick (t, dt) {
+      if (!dt || !this.rig) return;
+      const ds = dt / 1000;
+
+      /* ── Oxygen ── */
+      this.oxygen = Math.max(0, this.oxygen - ds * 0.22);
+      const oxyPct = Math.floor(this.oxygen);
+      this.oxyText.setAttribute('value', oxyPct > 0 ? `O₂  ${oxyPct}%` : 'O₂  EMPTY!');
+      // Colour the bar
+      const barColor = oxyPct > 40 ? '#00e5ff' : oxyPct > 15 ? '#ffaa00' : '#ff2244';
+      this.oxyBar.setAttribute('width', Math.max(0.01, 0.54 * (this.oxygen / 100)));
+      this.oxyBar.setAttribute('color', barColor);
+      this.oxyText.setAttribute('color', barColor);
+
+      // Warning beep
+      const audio = this.el.sceneEl.systems['dive-audio'];
+      audio.setWarning(this.oxygen > 0 && this.oxygen < 18);
+
+      /* ── Depth ── */
+      const depth = Math.max(0, -this.rig.object3D.position.y);
+      const depthF = Math.min(depth / 100, 1);
+      this.depthText.setAttribute('value', `▼ ${depth.toFixed(1)} m`);
+
+      /* ── Day / Night cycle ── */
+      this.dayPhase += (ds / this.dayCycleDur) * Math.PI * 2;
+      if (this.dayPhase > Math.PI * 2) this.dayPhase -= Math.PI * 2;
+      const dayBright = (Math.sin(this.dayPhase) + 1) / 2;  // 0=night 1=day
+
+      /* ── Lighting ── */
+      const ambI = (0.55 - depthF * 0.45) * (0.35 + dayBright * 0.65);
+      this.ambLight.setAttribute('light', 'intensity', Math.max(0.04, ambI));
+      const sunI = (1.0 - depthF) * dayBright;
+      this.sunLight.setAttribute('light', 'intensity', Math.max(0, sunI));
+
+      /* ── Fog / Sky ── */
+      const fogDensity = 0.015 + depthF * 0.075;
+      const lerpC = (a, b, f) => Math.floor(a + (b - a) * f);
+      // Surface colour depends on day/night
+      const sr = lerpC(0, 5, 1 - dayBright);
+      const sg = lerpC(85, 10, depthF);
+      const sb = lerpC(160, 25, depthF);
+      const hex = v => v.toString(16).padStart(2, '0');
+      const fogCol = `#${hex(sr)}${hex(sg)}${hex(sb)}`;
+
+      this.el.setAttribute('fog', { type: 'exponential', color: fogCol, density: fogDensity });
+      this.skyEl.setAttribute('material', 'color', fogCol);
+
+      /* ── Vignette ring opacity ── */
+      const vigOp = depthF * 0.65 + (this.oxygen <= 0 ? (Math.sin(t * 0.008) * 0.5 + 0.5) * 0.7 : 0);
+      this.vignetteEl.setAttribute('material', 'opacity', Math.min(vigOp, 0.92));
+      if (this.oxygen <= 0) {
+        this.vignetteEl.setAttribute('material', 'color',
+          Date.now() % 700 < 350 ? '#440000' : '#000000');
+      } else {
+        this.vignetteEl.setAttribute('material', 'color', '#000000');
+      }
+
+      /* ── Audio depth ── */
+      audio.updateDepth(depthF);
+    }
+  });
+
+  /* ───────────────────────────────────────────────────────────────────
+     3.  SWIM CONTROLS
+         Grip = ascend / descend.  Trigger = interact (collect).
+         Joystick movement is handled by aframe-extras movement-controls.
+         Also fires bubble audio while moving.
+     ─────────────────────────────────────────────────────────────────── */
+  AFRAME.registerComponent('swim-controls', {
+    init () {
+      this.lGrip = false;
+      this.rGrip = false;
+      this.prevPos = new THREE.Vector3();
+
+      const lh = document.getElementById('left-hand');
+      const rh = document.getElementById('right-hand');
+
+      if (lh) {
+        lh.addEventListener('gripdown',   () => this.lGrip = true);
+        lh.addEventListener('gripup',     () => this.lGrip = false);
+      }
+      if (rh) {
+        rh.addEventListener('gripdown',   () => this.rGrip = true);
+        rh.addEventListener('gripup',     () => this.rGrip = false);
+      }
+    },
+
+    tick (t, dt) {
+      if (!dt) return;
+      const rig = this.el;
+      const pos = rig.object3D.position;
+      const spd = 3.0 * (dt / 1000);
+
+      // Grip buttons for vertical movement
+      if (this.lGrip) pos.y += spd;   // left grip = ascend
+      if (this.rGrip) pos.y -= spd;   // right grip = descend
+
+      // Clamp
+      if (pos.y >  0)    pos.y = 0;
+      if (pos.y < -98)   pos.y = -98;
+
+      // Bubble audio when moving
+      const moved = pos.distanceTo(this.prevPos);
+      if (moved > 0.005) {
+        this.el.sceneEl.systems['dive-audio'].bubble();
+      }
+      this.prevPos.copy(pos);
+    }
+  });
+
+  /* ───────────────────────────────────────────────────────────────────
+     4.  SCHOOLING FISH
+         Lightweight boid-like circular schooling.  Fish flee the player.
+     ─────────────────────────────────────────────────────────────────── */
+  AFRAME.registerComponent('school', {
+    schema: {
+      count:  { default: 20 },
+      radius: { default: 10 },
+      cx: { default: 0 }, cy: { default: -12 }, cz: { default: -15 },
+      color:  { default: '#ffaa22' },
+      color2: { default: '#ffe680' },
+      size:   { default: 0.35 }
+    },
+    init () {
+      this.fish = [];
+      const d = this.data;
+      for (let i = 0; i < d.count; i++) {
+        const el = document.createElement('a-entity');
+
+        // Fish body — low-poly cone
+        const body = document.createElement('a-cone');
+        const c = Math.random() > 0.75 ? d.color2 : d.color;
+        const s = d.size * (0.7 + Math.random() * 0.6);
+        body.setAttribute('radius-bottom', s * 0.35);
+        body.setAttribute('radius-top',    s * 0.04);
+        body.setAttribute('height',        s);
+        body.setAttribute('segments-radial', 5);
+        body.setAttribute('segments-height', 1);
+        body.setAttribute('material', `shader: flat; color: ${c}`);
+        body.setAttribute('rotation', '90 0 0');
+        el.appendChild(body);
+
+        // Tail — small box simulating fin
+        const tail = document.createElement('a-box');
+        tail.setAttribute('width',  s * 0.45);
+        tail.setAttribute('height', s * 0.55);
+        tail.setAttribute('depth',  s * 0.06);
+        tail.setAttribute('material', `shader: flat; color: ${c}`);
+        tail.setAttribute('position', `0 0 ${s * 0.55}`);
+        el.appendChild(tail);
+
+        el.setAttribute('class', 'interactable');
+        this.el.appendChild(el);
+
+        this.fish.push({
+          el,
+          angle: Math.random() * Math.PI * 2,
+          speed: 0.35 + Math.random() * 0.5,
+          dist:  d.radius * (0.25 + Math.random() * 0.75),
+          yPhase: Math.random() * Math.PI * 2,
+          fleeUntil: 0
+        });
+      }
+    },
+
+    tick (t, dt) {
+      if (!dt) return;
+      const d = this.data;
+      const rig = document.getElementById('rig');
+      if (!rig) return;
+      const rp = rig.object3D.position;
+
+      for (const f of this.fish) {
+        // Flee detection
+        const wp = new THREE.Vector3();
+        f.el.object3D.getWorldPosition(wp);
+        if (wp.distanceTo(rp) < 3.5) f.fleeUntil = t + 2500;
+
+        const fleeing = t < f.fleeUntil;
+        const sp = fleeing ? f.speed * 5 : f.speed;
+
+        f.angle  += sp * dt / 1000;
+        f.yPhase += dt / 2200;
+
+        const x = d.cx + Math.cos(f.angle) * f.dist;
+        const z = d.cz + Math.sin(f.angle) * f.dist;
+        const y = d.cy + Math.sin(f.yPhase) * (fleeing ? 3.5 : 1.2);
+
+        // Heading direction
+        const px = f.el.object3D.position;
+        const heading = Math.atan2(x - px.x, z - px.z);
+        f.el.object3D.position.set(x, y, z);
+        f.el.object3D.rotation.set(0, heading, 0);
+      }
+    }
+  });
+
+  /* ───────────────────────────────────────────────────────────────────
+     5.  JELLYFISH
+         Glowing, gently bobbing, pulsing bell + tentacles.
+     ─────────────────────────────────────────────────────────────────── */
+  AFRAME.registerComponent('jellyfish', {
+    init () {
+      this.baseY  = this.el.object3D.position.y;
+      this.offset = Math.random() * 200;
+    },
+    tick (t) {
+      // Gentle vertical bob
+      this.el.object3D.position.y =
+        this.baseY + Math.sin(t / 2000 + this.offset) * 2;
+
+      // Pulsating bell scale
+      const p = 1 + Math.sin(t / 700 + this.offset) * 0.18;
+      this.el.object3D.scale.set(p, 1 + (1 - p) * 0.6, p);
+    }
+  });
+
+  /* ───────────────────────────────────────────────────────────────────
+     6.  SHARK AI
+         Orbits a centre point, tilts body slightly, slow menacing circles.
+     ─────────────────────────────────────────────────────────────────── */
+  AFRAME.registerComponent('shark-ai', {
+    schema: {
+      cx: { default: 0 }, cy: { default: -30 }, cz: { default: 0 },
+      radius: { default: 40 }, speed: { default: 0.12 }
+    },
+    init () { this.angle = Math.random() * Math.PI * 2; },
+    tick (t, dt) {
+      if (!dt) return;
+      const d = this.data;
+      this.angle += d.speed * dt / 1000;
+      const x = d.cx + Math.cos(this.angle) * d.radius;
+      const z = d.cz + Math.sin(this.angle) * d.radius;
+      const y = d.cy + Math.sin(this.angle * 0.7) * 4;
+
+      const px = this.el.object3D.position;
+      const heading = Math.atan2(x - px.x, z - px.z);
+      this.el.object3D.position.set(x, y, z);
+      this.el.object3D.rotation.set(0, heading, Math.sin(t / 2000) * 0.08);
+    }
+  });
+
+  /* ───────────────────────────────────────────────────────────────────
+     7.  WATER PARTICLES
+         Float upwards near the player — simulates plankton / silt.
+     ─────────────────────────────────────────────────────────────────── */
+  AFRAME.registerComponent('water-particles', {
+    init () {
+      this.parts = [];
+      for (let i = 0; i < 60; i++) {
+        const p = document.createElement('a-sphere');
+        const r = 0.012 + Math.random() * 0.018;
+        p.setAttribute('radius', r);
+        p.setAttribute('material', 'shader: flat; color: #b0e0ff; transparent: true; opacity: 0.25; depthWrite: false');
+        this.el.appendChild(p);
+        this.parts.push({ el: p, spd: 0.3 + Math.random() * 0.7 });
+      }
+      this._needInit = true;
+    },
+    _reset (el) {
+      const rp = document.getElementById('rig').object3D.position;
+      el.object3D.position.set(
+        rp.x + (Math.random() - 0.5) * 10,
+        rp.y - 3 - Math.random() * 4,
+        rp.z + (Math.random() - 0.5) * 10
+      );
+    },
+    tick (t, dt) {
+      if (!dt) return;
+      if (this._needInit) { this.parts.forEach(p => this._reset(p.el)); this._needInit = false; }
+      const ry = document.getElementById('rig').object3D.position.y;
+      for (const p of this.parts) {
+        p.el.object3D.position.y += p.spd * dt / 1000;
+        p.el.object3D.position.x += Math.sin(t / 600 + p.spd * 10) * 0.003;
+        if (p.el.object3D.position.y > ry + 5) this._reset(p.el);
+      }
+    }
+  });
+
+  /* ───────────────────────────────────────────────────────────────────
+     8.  CAUSTIC LIGHT RAYS
+         Animated vertical spotlights that sway to fake sun caustics.
+     ─────────────────────────────────────────────────────────────────── */
+  AFRAME.registerComponent('caustic-rays', {
+    init () {
+      this.rays = [];
+      for (let i = 0; i < 7; i++) {
+        const ray = document.createElement('a-cylinder');
+        ray.setAttribute('radius',   0.15 + Math.random() * 0.3);
+        ray.setAttribute('height',   40 + Math.random() * 30);
+        ray.setAttribute('segments-radial', 6);
+        ray.setAttribute('segments-height', 1);
+        ray.setAttribute('material',
+          'shader: flat; color: #aaeeff; transparent: true; opacity: 0.06; side: double; depthWrite: false');
+        ray.setAttribute('position', {
+          x: (Math.random() - 0.5) * 40,
+          y: 10,
+          z: (Math.random() - 0.5) * 40
+        });
+        this.el.appendChild(ray);
+        this.rays.push({ el: ray, phase: Math.random() * 100, speed: 0.5 + Math.random() });
+      }
+    },
+    tick (t) {
+      for (const r of this.rays) {
+        const s = 0.7 + Math.sin(t / 2000 + r.phase) * 0.5;
+        r.el.object3D.scale.set(s, 1, s);
+        r.el.object3D.rotation.x = Math.sin(t / 4000 + r.phase) * 0.06;
+        r.el.object3D.rotation.z = Math.cos(t / 3500 + r.phase) * 0.06;
+      }
+    }
+  });
+
+  /* ───────────────────────────────────────────────────────────────────
+     9.  COLLECTIBLE
+         Treasure / shell — glows, rotates, collected on trigger click.
+     ─────────────────────────────────────────────────────────────────── */
+  AFRAME.registerComponent('collectible', {
+    schema: { points: { default: 10 } },
+    init () {
+      this.collected = false;
+      this.el.setAttribute('class', 'interactable');
+
+      // Click / trigger interaction
+      this.el.addEventListener('click', () => {
+        if (this.collected) return;
+        this.collected = true;
+
+        // Score
+        const mgr = this.el.sceneEl.components['dive-manager'];
+        if (mgr) mgr.addScore(this.data.points);
+
+        // Quick collect animation
+        this.el.setAttribute('animation', {
+          property: 'scale', to: '0 0 0', dur: 400, easing: 'easeInQuad'
+        });
+        setTimeout(() => this.el.parentNode && this.el.parentNode.removeChild(this.el), 500);
+      });
+    },
+    tick (t) {
+      if (this.collected) return;
+      // Gentle spin + hover
+      this.el.object3D.rotation.y = t * 0.001;
+      this.el.object3D.position.y += Math.sin(t / 800) * 0.002;
+    }
+  });
+
+  /* ───────────────────────────────────────────────────────────────────
+     10. CORAL GENERATOR
+         Spawns randomised coral-like shapes on the sea floor.
+     ─────────────────────────────────────────────────────────────────── */
+  AFRAME.registerComponent('coral-garden', {
+    schema: { count: { default: 30 } },
+    init () {
+      const palette = [
+        '#ff6688', '#ff4466', '#cc3355',          // warm coral
+        '#ff8844', '#ffaa66',                     // orange fan
+        '#ee55aa', '#dd44cc',                     // magenta
+        '#44ddaa', '#22cc99',                     // green reef
+        '#ff99cc', '#ffbbdd'                      // pastel pink
+      ];
+
+      for (let i = 0; i < this.data.count; i++) {
+        const coral = document.createElement('a-entity');
+        const type = Math.floor(Math.random() * 3);
+        const color = palette[Math.floor(Math.random() * palette.length)];
+        const x = (Math.random() - 0.5) * 120;
+        const z = (Math.random() - 0.5) * 120;
+
+        if (type === 0) {
+          // Branching coral (cone cluster)
+          for (let b = 0; b < 3 + Math.floor(Math.random() * 3); b++) {
+            const branch = document.createElement('a-cone');
+            const h = 1.5 + Math.random() * 3;
+            branch.setAttribute('radius-bottom', 0.3 + Math.random() * 0.4);
+            branch.setAttribute('radius-top', 0.05);
+            branch.setAttribute('height', h);
+            branch.setAttribute('segments-radial', 5);
+            branch.setAttribute('segments-height', 1);
+            branch.setAttribute('material', `shader: flat; color: ${color}`);
+            branch.setAttribute('position', {
+              x: (Math.random() - 0.5) * 1.5,
+              y: h / 2,
+              z: (Math.random() - 0.5) * 1.5
+            });
+            branch.setAttribute('rotation', {
+              x: (Math.random() - 0.5) * 30,
+              y: Math.random() * 360,
+              z: (Math.random() - 0.5) * 30
+            });
+            coral.appendChild(branch);
+          }
+        } else if (type === 1) {
+          // Brain coral (flattened sphere)
+          const brain = document.createElement('a-sphere');
+          brain.setAttribute('radius', 0.8 + Math.random() * 1.2);
+          brain.setAttribute('segments-width', 8);
+          brain.setAttribute('segments-height', 6);
+          brain.setAttribute('material', `color: ${color}; roughness: 1`);
+          brain.setAttribute('scale', `1 ${0.4 + Math.random() * 0.3} 1`);
+          brain.setAttribute('position', '0 0.3 0');
+          coral.appendChild(brain);
+        } else {
+          // Fan coral (thin box)
+          const fan = document.createElement('a-box');
+          fan.setAttribute('width',  1.5 + Math.random() * 2);
+          fan.setAttribute('height', 2 + Math.random() * 2.5);
+          fan.setAttribute('depth',  0.08);
+          fan.setAttribute('material', `shader: flat; color: ${color}; transparent: true; opacity: 0.85; side: double`);
+          fan.setAttribute('position', `0 ${1 + Math.random()} 0`);
+          fan.setAttribute('rotation', `0 ${Math.random() * 360} 0`);
+          coral.appendChild(fan);
         }
-        
-        #start-overlay h1 { font-size: 3rem; margin-bottom: 10px; color: #00d4ff; text-shadow: 0 0 10px rgba(0, 212, 255, 0.5); }
-        #start-overlay p { font-size: 1.2rem; max-width: 600px; margin: 10px 20px; line-height: 1.5; color: #b3e5fc; }
-        
-        button {
-            padding: 15px 40px; font-size: 1.5rem; border-radius: 30px; margin-top: 30px;
-            border: 2px solid #00d4ff; background: rgba(0, 80, 150, 0.5); color: white;
-            cursor: pointer; transition: all 0.3s ease; box-shadow: 0 0 15px rgba(0, 212, 255, 0.4);
-        }
-        button:hover {
-            background: rgba(0, 150, 255, 0.8);
-            transform: scale(1.05);
-            box-shadow: 0 0 25px rgba(0, 212, 255, 0.8);
-        }
 
-        .controls-info { background: rgba(0,0,0,0.4); padding: 15px; border-radius: 10px; margin-top: 20px; border: 1px solid rgba(255,255,255,0.2); }
-    </style>
+        coral.setAttribute('position', { x, y: 0, z });
+        this.el.appendChild(coral);
+      }
+    }
+  });
 
-    <script>
-        // System to manage audio and dive logic
-        AFRAME.registerSystem('dive-system', {
-            init: function () {
-                this.audioCtx = null;
-                this.filter = null;
-                this.heartGain = null;
-            },
-            startAudio: function() {
-                if(this.audioCtx) return; // Prevent multiple contexts
-                this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-                
-                // 1. Ambient Underwater Noise
-                const bufferSize = this.audioCtx.sampleRate * 2; // 2 seconds
-                const buffer = this.audioCtx.createBuffer(1, bufferSize, this.audioCtx.sampleRate);
-                const data = buffer.getChannelData(0);
-                for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1; // White noise
-                const noiseSource = this.audioCtx.createBufferSource();
-                noiseSource.buffer = buffer; 
-                noiseSource.loop = true;
-                
-                // Low-pass filter to make it sound "underwater"
-                this.filter = this.audioCtx.createBiquadFilter();
-                this.filter.type = 'lowpass';
-                this.filter.frequency.value = 600; // Will decrease with depth
-                
-                const gain = this.audioCtx.createGain(); 
-                gain.gain.value = 0.4;
-                
-                noiseSource.connect(this.filter); 
-                this.filter.connect(gain); 
-                gain.connect(this.audioCtx.destination);
-                noiseSource.start();
-                
-                // 2. Deep pressure heartbeat (starts faint, gets louder at depth)
-                const heartbeat = this.audioCtx.createOscillator();
-                heartbeat.type = 'sine';
-                heartbeat.frequency.value = 45; // Deep sub-bass thud
-                
-                this.heartGain = this.audioCtx.createGain();
-                this.heartGain.gain.value = 0;
-                
-                heartbeat.connect(this.heartGain);
-                this.heartGain.connect(this.audioCtx.destination);
-                heartbeat.start();
-            },
-            updateDepthAudio: function(depthFactor) {
-                if(!this.filter) return;
-                
-                // At surface: 600Hz, At max depth (1.0 factor): 150Hz
-                this.filter.frequency.value = 600 - (depthFactor * 450); 
-                
-                // Heartbeat activates intensely past 70% depth factor
-                if (depthFactor > 0.7) {
-                    const time = Date.now() % 1000; 
-                    // Simulate double beat "lub-dub"
-                    const isBeat = (time < 150 || (time > 250 && time < 400)) ? 1 : 0;
-                    this.heartGain.gain.value = isBeat * (depthFactor - 0.7) * 3.0; 
-                } else {
-                    this.heartGain.gain.value = 0;
-                }
-            }
+  /* ───────────────────────────────────────────────────────────────────
+     11. TERRAIN BUMPS
+         Adds random rock-mound shapes on the sea floor for elevation.
+     ─────────────────────────────────────────────────────────────────── */
+  AFRAME.registerComponent('terrain-bumps', {
+    schema: { count: { default: 18 } },
+    init () {
+      const rockColors = ['#3a4535', '#4a5540', '#2e3a2a', '#5a6355', '#4d5548'];
+      for (let i = 0; i < this.data.count; i++) {
+        const rock = document.createElement('a-sphere');
+        const r = 3 + Math.random() * 12;
+        rock.setAttribute('radius', r);
+        rock.setAttribute('segments-width',  7);
+        rock.setAttribute('segments-height', 5);
+        rock.setAttribute('material',
+          `color: ${rockColors[Math.floor(Math.random() * rockColors.length)]}; roughness: 1; metalness: 0`);
+        rock.setAttribute('scale', `${1 + Math.random()} ${0.25 + Math.random() * 0.5} ${1 + Math.random()}`);
+        rock.setAttribute('position', {
+          x: (Math.random() - 0.5) * 160,
+          y: -r * 0.1,
+          z: (Math.random() - 0.5) * 160
         });
+        this.el.appendChild(rock);
+      }
+    }
+  });
 
-        // Dive Manager handles depth visuals, fog, oxygen, and HUD
-        AFRAME.registerComponent('dive-manager', {
-            init: function() {
-                this.camera = document.querySelector('#camera');
-                this.sunLight = document.querySelector('#sun-light');
-                this.ambientLight = document.querySelector('#ambient-light');
-                this.scene = document.querySelector('a-scene');
-                
-                // HUD elements
-                this.oxygenText = document.querySelector('#oxygen-text');
-                this.depthText = document.querySelector('#depth-text');
-                this.vignette = document.querySelector('#vignette');
-                
-                // Warning states
-                this.oxygen = 100;
-                this.isWarning = false;
-            },
-            tick: function(t, dt) {
-                if(!dt) return;
-                
-                // Oxygen mechanic (lasts roughly 500 seconds without penalty)
-                this.oxygen -= (dt / 1000) * 0.2; 
-                
-                if (this.oxygen <= 0) {
-                    this.oxygenText.setAttribute('value', 'OXYGEN: 0% - DANGER!');
-                    this.oxygenText.setAttribute('color', '#ff0000');
-                    if(Date.now() % 500 < 250 && this.vignette.getAttribute('color') !== '#ff0000') {
-                        this.vignette.setAttribute('color', '#ff0000'); // Flashing red
-                    } else if (Date.now() % 500 >= 250) {
-                        this.vignette.setAttribute('color', '#000000');
-                    }
-                } else {
-                    this.oxygenText.setAttribute('value', `OXYGEN: ${Math.floor(this.oxygen)}%`);
-                    if (this.oxygen < 20) {
-                        this.oxygenText.setAttribute('color', '#ff3333');
-                    }
-                }
-
-                // Depth mechanic (0m to 100m)
-                const rigPos = document.querySelector('#rig').object3D.position;
-                const depth = Math.max(0, -rigPos.y); 
-                this.depthText.setAttribute('value', `DEPTH: ${depth.toFixed(1)}m`);
-                
-                // Depth factor goes from 0.0 at surface to 1.0 at 100m
-                const depthFactor = Math.min(depth / 100, 1.0); 
-                
-                // Dynamic Lighting 
-                const ambientInt = 0.6 - (depthFactor * 0.5);      // 0.6 -> 0.1
-                this.ambientLight.setAttribute('intensity', ambientInt);
-                
-                const sunInt = 1.0 - (depthFactor * 1.0);          // 1.0 -> 0.0
-                this.sunLight.setAttribute('intensity', Math.max(0, sunInt));
-                
-                // Volumetric Fog density increases and shifts to deep black
-                const fogDens = 0.02 + (depthFactor * 0.08);       // 0.02 -> 0.10
-                
-                // Interpolate sky/fog color from bright blue to dark midnight
-                const r = Math.floor(0 * (1 - depthFactor) + 0 * depthFactor);
-                const g = Math.floor(68 * (1 - depthFactor) + 5 * depthFactor);
-                const b = Math.floor(136 * (1 - depthFactor) + 20 * depthFactor);
-                const colorHex = `#${r.toString(16).padStart(2,'0')}${g.toString(16).padStart(2,'0')}${b.toString(16).padStart(2,'0')}`;
-
-                this.scene.setAttribute('fog', `color: ${colorHex}; density: ${fogDens}`);
-                document.querySelector('a-sky').setAttribute('color', colorHex);
-                
-                // Pressure Vignette
-                if (this.oxygen > 0) {
-                    this.vignette.setAttribute('color', '#000000');
-                    this.vignette.setAttribute('opacity', depthFactor * 0.85); // Very thick at bottom
-                }
-                
-                // Apply audio changes
-                this.el.sceneEl.systems['dive-system'].updateDepthAudio(depthFactor);
-            }
-        });
-
-        // Full controller mapped locomotion (Verticality via grips)
-        AFRAME.registerComponent('swim-controls', {
-            init: function() {
-                this.leftGrip = false;
-                this.rightGrip = false;
-                
-                const leftHand = document.querySelector('#leftHand');
-                const rightHand = document.querySelector('#rightHand');
-                
-                if(leftHand) {
-                    leftHand.addEventListener('gripdown', () => { this.leftGrip = true; });
-                    leftHand.addEventListener('gripup', () => { this.leftGrip = false; });
-                }
-                if(rightHand) {
-                    rightHand.addEventListener('gripdown', () => { this.rightGrip = true; });
-                    rightHand.addEventListener('gripup', () => { this.rightGrip = false; });
-                }
-            },
-            tick: function(t, dt) {
-                if (!dt) return;
-                const rig = document.querySelector('#rig');
-                const pos = rig.object3D.position;
-                const speed = 2.5 * (dt / 1000); // meters per second
-                
-                // Left Grip = Ascend, Right Grip = Descend
-                if (this.rightGrip) pos.y -= speed; 
-                if (this.leftGrip) pos.y += speed;  
-                
-                // Collision limits
-                if (pos.y > 0) pos.y = 0;          // Water surface
-                if (pos.y < -98.5) pos.y = -98.5;  // Just above sea floor
-            }
-        });
-
-        // AI Marine Life - Schooling behavior using primitive geometry for lightweight 
-        AFRAME.registerComponent('schooling-fish', {
-            schema: {
-                count: {default: 15},
-                radius: {default: 8},
-                center: {type: 'vec3', default: {x: 0, y: -10, z: 0}},
-                baseColor: {default: '#ffaa00'}
-            },
-            init: function() {
-                this.fishes = [];
-                for (let i = 0; i < this.data.count; i++) {
-                    const fishInfo = this.createFishEntity();
-                    this.el.appendChild(fishInfo.el);
-                    this.fishes.push(fishInfo);
-                }
-            },
-            createFishEntity: function() {
-                const fish = document.createElement('a-entity');
-                
-                // Color variation
-                const isVariant = Math.random() > 0.8;
-                const fishColor = isVariant ? '#ffffff' : this.data.baseColor;
-
-                // Simple optimized geometry representation (Cone + Triangle)
-                const body = document.createElement('a-cone');
-                body.setAttribute('radius-bottom', 0.15);
-                body.setAttribute('radius-top', 0.01);
-                body.setAttribute('height', 0.6);
-                body.setAttribute('color', fishColor);
-                body.setAttribute('rotation', '90 0 0');
-                body.setAttribute('material', 'shader: flat'); // Save performance
-                
-                const tail = document.createElement('a-triangle');
-                tail.setAttribute('vertex-a', '0 0.15 0');
-                tail.setAttribute('vertex-b', '-0.15 -0.15 0');
-                tail.setAttribute('vertex-c', '0.15 -0.15 0');
-                tail.setAttribute('color', fishColor);
-                tail.setAttribute('position', '0 0.35 0');
-                tail.setAttribute('rotation', '-90 0 0');
-                tail.setAttribute('material', 'shader: flat');
-                
-                fish.appendChild(body);
-                fish.appendChild(tail);
-                
-                return {
-                    el: fish,
-                    angle: Math.random() * Math.PI * 2,
-                    speed: 0.4 + Math.random() * 0.4,
-                    dist: this.data.radius * (0.3 + Math.random() * 0.7),
-                    yOff: Math.random() * Math.PI * 2,
-                    fleeEnd: 0 // timestamp
-                };
-            },
-            tick: function(t, dt) {
-                if(!dt) return;
-                const center = this.data.center;
-                const rigPos = document.querySelector('#rig').object3D.position;
-                
-                this.fishes.forEach(f => {
-                    // Check distance to player for fleeing
-                    const distToPlayer = f.el.object3D.position.distanceTo(rigPos);
-                    if (distToPlayer < 4) {
-                        f.fleeEnd = t + 2000; // Flee for 2 seconds
-                    }
-
-                    const isFleeing = t < f.fleeEnd;
-                    const currentSpeed = isFleeing ? f.speed * 4 : f.speed;
-
-                    f.angle += (currentSpeed * dt / 1000);
-                    f.yOff += dt / 2500;
-                    
-                    const x = center.x + Math.cos(f.angle) * f.dist;
-                    const z = center.z + Math.sin(f.angle) * f.dist;
-                    const y = center.y + Math.sin(f.yOff) * (isFleeing ? 3 : 1.5);
-                    
-                    const currentPos = f.el.object3D.position;
-                    
-                    // Look in direction of travel
-                    const dx = x - currentPos.x;
-                    const dz = z - currentPos.z;
-                    const angleY = Math.atan2(dx, dz);
-                    
-                    f.el.object3D.position.set(x, y, z);
-                    f.el.object3D.rotation.set(0, angleY, 0); 
-                });
-            }
-        });
-
-        // Bioluminescent Jellyfish animation
-        AFRAME.registerComponent('jellyfish-anim', {
-            init: function() {
-                this.baseY = this.el.object3D.position.y;
-                this.offset = Math.random() * 100;
-            },
-            tick: function(t, dt) {
-                // Bobbing up and down
-                const y = this.baseY + Math.sin(t / 1500 + this.offset) * 1.5;
-                this.el.object3D.position.y = y;
-                
-                // Pulsing animation (swimming motion)
-                const s = 1 + Math.sin(t / 800 + this.offset) * 0.15;
-                this.el.object3D.scale.set(s, 1 + (1-s)*0.5, s); 
-            }
-        });
-
-        // Water particles / Bubbles surrounding player
-        AFRAME.registerComponent('water-particles', {
-            init: function() {
-                this.particles = [];
-                for(let i=0; i < 40; i++) {
-                    let p = document.createElement('a-sphere');
-                    p.setAttribute('radius', 0.015 + Math.random()*0.02);
-                    p.setAttribute('color', '#aaddff');
-                    p.setAttribute('material', 'shader: flat; transparent: true; opacity: 0.3; depthWrite: false');
-                    this.el.appendChild(p);
-                    
-                    this.particles.push({el: p, speed: 0.5 + Math.random()});
-                }
-                this.needsResetAll = true;
-            },
-            resetParticle: function(p) {
-                const rigPos = document.querySelector('#rig').object3D.position;
-                p.object3D.position.set(
-                    rigPos.x + (Math.random() - 0.5) * 8,
-                    rigPos.y - 4 + Math.random() * 2,
-                    rigPos.z + (Math.random() - 0.5) * 8
-                );
-            },
-            tick: function(t, dt) {
-                if (this.needsResetAll) {
-                    this.particles.forEach(p => this.resetParticle(p.el));
-                    this.needsResetAll = false;
-                }
-                const rigPos = document.querySelector('#rig').object3D.position;
-                this.particles.forEach(p => {
-                    p.el.object3D.position.y += p.speed * dt / 1000;
-                    p.el.object3D.position.x += Math.sin(t/500 + p.speed) * 0.005;
-                    
-                    if (p.el.object3D.position.y > rigPos.y + 4) {
-                        this.resetParticle(p.el);
-                    }
-                });
-            }
-        });
-
-        // Raycast interactivity scale
-        AFRAME.registerComponent('interactive-object', {
-            init: function() {
-                this.el.addEventListener('raycaster-intersected', () => {
-                    this.el.object3D.scale.multiplyScalar(1.2);
-                });
-                this.el.addEventListener('raycaster-intersected-cleared', () => {
-                    this.el.object3D.scale.multiplyScalar(1 / 1.2);
-                });
-            }
-        });
-
-        function startExperience() {
-            document.getElementById('start-overlay').style.display = 'none';
-            document.querySelector('a-scene').systems['dive-system'].startAudio();
-        }
-    </script>
+  /* ───────────────────────────────────────────────────────────────────
+     12. Utility: Start button handler
+     ─────────────────────────────────────────────────────────────────── */
+  function startExperience () {
+    document.getElementById('start-overlay').style.display = 'none';
+    const scene = document.querySelector('a-scene');
+    scene.systems['dive-audio'].start();
+  }
+  </script>
 </head>
-<body>
-    
-    <!-- UI Entry Menu -->
-    <div id="start-overlay">
-        <h1>Deep Ocean Explorer</h1>
-        <p>Experience realistic scuba diving. Control your movement smoothly using the Meta Quest controllers.</p>
-        
-        <div class="controls-info">
-            <strong>🎮 Controller Mapping:</strong><br><br>
-            • 🕹️ <b>Left/Right Joystick:</b> Swim Forward / Backward / Strafe <br>
-            • ✊ <b>Left Grip Button:</b> Swim UP (Ascend) <br>
-            • ✊ <b>Right Grip Button:</b> Swim DOWN (Descend) <br>
-            • 👈 <b>Triggers/Pointers:</b> Highlight interactive creatures
-        </div>
 
-        <button onclick="startExperience()">Start Diving VR</button>
+<!-- ═══════════════════════════════════════════════════════════════════
+     BODY — Overlay + A-Frame Scene
+     ═══════════════════════════════════════════════════════════════════ -->
+<body>
+
+  <!-- Splash / Instructions -->
+  <div id="start-overlay">
+    <h1>🤿 Deep Ocean Explorer</h1>
+    <p class="subtitle">An immersive WebXR scuba-diving simulation</p>
+
+    <div class="controls-box">
+      <strong>🎮  Meta Quest Controller Map</strong>
+      🕹️  <span>Left Stick</span> — Move / Strafe<br>
+      🕹️  <span>Right Stick</span> — Snap Turn<br>
+      ✊  <span>Left Grip</span> — Ascend (swim up)<br>
+      ✊  <span>Right Grip</span> — Descend (swim down)<br>
+      🔫  <span>Trigger</span> — Collect treasure / interact<br>
+      📏  Depth range: 0 m → 100 m
     </div>
 
-    <!-- VR Scene setup with graphics management -->
-    <a-scene fog="type: exponential; color: #004488; density: 0.02" dive-manager renderer="colorManagement: true; antialias: true;">
-        
-        <!-- Persistent Particles attached to rig context -->
-        <a-entity water-particles></a-entity>
+    <button id="start-btn" onclick="startExperience()">Dive In 🌊</button>
+  </div>
 
-        <!-- Lighting Elements -->
-        <a-light id="ambient-light" type="ambient" color="#4477aa" intensity="0.6"></a-light>
-        <!-- Directional light mimics sun rays coming from the surface -->
-        <a-light id="sun-light" type="directional" position="0 10 0" color="#e0f7fa" intensity="1.0" castShadow="false"></a-light>
+  <!-- ═════════════  A-FRAME SCENE  ═════════════ -->
+  <a-scene
+    dive-manager
+    fog="type: exponential; color: #004888; density: 0.018"
+    renderer="colorManagement: true; antialias: true; physicallyCorrectLights: true"
+    vr-mode-ui="enabled: true"
+    webxr="requiredFeatures: local-floor; optionalFeatures: hand-tracking"
+  >
 
-        <!-- Dynamic Sky -->
-        <a-sky color="#004488"></a-sky>
+    <!-- ── Assets ── -->
+    <a-assets timeout="8000"></a-assets>
 
-        <!-- OCEAN FLOOR AND TERRAIN (Depth: -100m) -->
-        <a-entity position="0 -100 0">
-            <!-- Main Sandy Floor -->
-            <a-plane rotation="-90 0 0" width="800" height="800" color="#b5a642" material="roughness: 1; metalness: 0;"></a-plane>
-            
-            <!-- Procedural Rocks & Cave formations -->
-            <a-sphere position="20 0 -30" radius="10" color="#354230" scale="1.5 0.5 1"></a-sphere>
-            <a-sphere position="-25 0 -15" radius="15" color="#2b3b27" scale="2 0.8 1.5"></a-sphere>
-            <a-sphere position="5 0 25" radius="8" color="#45543c" scale="1.2 0.6 1"></a-sphere>
-            <a-sphere position="-10 0 35" radius="12" color="#354230" scale="1 0.4 1"></a-sphere>
+    <!-- ── Lighting ── -->
+    <a-light id="ambient-light" type="ambient" color="#5588aa" intensity="0.55"></a-light>
+    <a-light id="sun-light"     type="directional" position="2 50 10" color="#c8ecff" intensity="0.9"></a-light>
 
-            <!-- Huge underwater arch / cave entrance -->
-            <a-torus position="0 0 -60" radius="25" tube="8" color="#2b3b27" rotation="-20 0 0" arc="180" scale="1 2 1"></a-torus>
+    <!-- ── Sky ── -->
+    <a-sky id="sky" color="#004888"></a-sky>
 
-            <!-- Deep Sea Bioluminescent Anemones/Plants -->
-            <a-entity position="20 5 -30">
-                <a-cone radius-bottom="0.8" radius-top="0.1" height="4" color="#00ffff" material="emissive: #00ffff; emissiveIntensity: 0.6; transparent: true; opacity: 0.8" rotation="10 0 20"></a-cone>
-                <a-cone radius-bottom="0.5" radius-top="0.1" height="5" color="#00ffff" material="emissive: #00ffff; emissiveIntensity: 0.6; transparent: true; opacity: 0.8" rotation="-10 0 0" position="1 0 1"></a-cone>
-            </a-entity>
+    <!-- ============================================================
+         CAUSTIC LIGHT RAYS (near surface)
+         ============================================================ -->
+    <a-entity caustic-rays position="0 0 0"></a-entity>
 
-            <a-entity position="-25 10 -15">
-                <a-cone radius-bottom="1.2" radius-top="0.2" height="6" color="#ff00ff" material="emissive: #ff00ff; emissiveIntensity: 0.6; transparent: true; opacity: 0.8" rotation="-20 0 -10"></a-cone>
-                <a-cone radius-bottom="1" radius-top="0.1" height="4" color="#ff88ff" material="emissive: #ff88ff; emissiveIntensity: 0.6; transparent: true; opacity: 0.8" rotation="0 0 20" position="-1 0 -2"></a-cone>
-            </a-entity>
+    <!-- ============================================================
+         WATER PARTICLES
+         ============================================================ -->
+    <a-entity water-particles></a-entity>
+
+    <!-- ============================================================
+         OCEAN FLOOR  (y = -100)
+         ============================================================ -->
+    <a-entity id="ocean-floor" position="0 -100 0">
+      <!-- Sand bed -->
+      <a-plane rotation="-90 0 0" width="500" height="500"
+               material="color: #a09050; roughness: 1; metalness: 0; flatShading: true"></a-plane>
+
+      <!-- Terrain bumps (random rocks / elevation) -->
+      <a-entity terrain-bumps="count: 22"></a-entity>
+
+      <!-- Coral reef garden -->
+      <a-entity coral-garden="count: 40"></a-entity>
+
+      <!-- ── Bioluminescent Deep Plants ── -->
+      <a-entity position="10 2 -20">
+        <a-cone radius-bottom="0.7" radius-top="0.08" height="4" segments-radial="5" segments-height="1"
+                material="shader: flat; color: #00ffdd; emissive: #00ffdd; emissiveIntensity: 0.9; transparent: true; opacity: 0.8"
+                rotation="8 0 15"></a-cone>
+        <a-cone radius-bottom="0.4" radius-top="0.05" height="5" segments-radial="5" segments-height="1"
+                material="shader: flat; color: #00ffbb; emissive: #00ffbb; emissiveIntensity: 0.8; transparent: true; opacity: 0.75"
+                rotation="-12 40 0" position="0.8 0 0.6"></a-cone>
+      </a-entity>
+
+      <a-entity position="-22 4 -10">
+        <a-cone radius-bottom="1" radius-top="0.12" height="5.5" segments-radial="5" segments-height="1"
+                material="shader: flat; color: #ff00ff; emissive: #ff00ff; emissiveIntensity: 0.7; transparent: true; opacity: 0.75"
+                rotation="-15 0 -12"></a-cone>
+        <a-cone radius-bottom="0.6" radius-top="0.08" height="3.5" segments-radial="5" segments-height="1"
+                material="shader: flat; color: #ff66ff; emissive: #ff66ff; emissiveIntensity: 0.6; transparent: true; opacity: 0.7"
+                rotation="5 0 25" position="-1.2 0 -1"></a-cone>
+        <a-light type="point" color="#ff00ff" intensity="0.25" distance="12" position="0 4 0"></a-light>
+      </a-entity>
+
+      <a-entity position="35 3 25">
+        <a-cone radius-bottom="0.5" radius-top="0.05" height="3" segments-radial="5" segments-height="1"
+                material="shader: flat; color: #44ffaa; emissive: #44ffaa; emissiveIntensity: 0.9; transparent: true; opacity: 0.8"
+                rotation="10 20 0"></a-cone>
+        <a-light type="point" color="#44ffaa" intensity="0.2" distance="10" position="0 3 0"></a-light>
+      </a-entity>
+
+      <!-- ── Cave Arch ── -->
+      <a-entity position="0 0 -55">
+        <a-torus radius="22" radius-tubular="6"
+                 segments-radial="8" segments-tubular="16"
+                 arc="180" rotation="-90 0 0"
+                 material="color: #2b3828; roughness: 1; flatShading: true"
+                 scale="1 1.6 1"></a-torus>
+        <!-- Glow inside cave -->
+        <a-light type="point" color="#00ffcc" intensity="0.35" distance="18" position="0 5 0"></a-light>
+      </a-entity>
+    </a-entity>
+
+    <!-- ============================================================
+         MARINE LIFE — Fish Schools
+         ============================================================ -->
+    <!-- Near surface — tropical -->
+    <a-entity school="count: 25; radius: 12; cx: 0;  cy: -8;  cz: -12; color: #ffaa22; color2: #ffe680; size: 0.35"></a-entity>
+    <a-entity school="count: 30; radius: 16; cx: 20; cy: -20; cz: 5;   color: #00ccff; color2: #88eeff; size: 0.30"></a-entity>
+
+    <!-- Mid-depth -->
+    <a-entity school="count: 20; radius: 10; cx: -18; cy: -45; cz: -25; color: #ff4488; color2: #ffaacc; size: 0.28"></a-entity>
+    <a-entity school="count: 18; radius: 14; cx: 30;  cy: -55; cz: 10;  color: #88ff44; color2: #ccffaa; size: 0.32"></a-entity>
+
+    <!-- Deep bioluminescent -->
+    <a-entity school="count: 12; radius: 8;  cx: -10; cy: -80; cz: -35; color: #00ffcc; color2: #aaffee; size: 0.22"></a-entity>
+
+    <!-- ============================================================
+         MARINE LIFE — Jellyfish
+         ============================================================ -->
+    <!-- Mid-depth jellyfish -->
+    <a-entity jellyfish position="-7 -42 -8" class="interactable">
+      <a-sphere radius="1" segments-width="10" segments-height="8"
+                material="shader: flat; color: #88ddff; emissive: #00aaff; emissiveIntensity: 0.6; transparent: true; opacity: 0.55"
+                scale="1 0.65 1"></a-sphere>
+      <a-cylinder radius="0.6" height="2.2" position="0 -1.1 0" open-ended="true"
+                  segments-radial="8" segments-height="1"
+                  material="shader: flat; color: #88ddff; transparent: true; opacity: 0.18; side: double"></a-cylinder>
+      <a-light type="point" color="#00aaff" intensity="0.2" distance="8"></a-light>
+    </a-entity>
+
+    <!-- Deep magenta jellyfish -->
+    <a-entity jellyfish position="15 -65 -18" class="interactable">
+      <a-sphere radius="1.4" segments-width="10" segments-height="8"
+                material="shader: flat; color: #ff88ee; emissive: #ff00cc; emissiveIntensity: 0.7; transparent: true; opacity: 0.5"
+                scale="1 0.55 1"></a-sphere>
+      <a-cylinder radius="0.9" height="3" position="0 -1.5 0" open-ended="true"
+                  segments-radial="8" segments-height="1"
+                  material="shader: flat; color: #ff88ee; transparent: true; opacity: 0.15; side: double"></a-cylinder>
+      <a-light type="point" color="#ff00cc" intensity="0.25" distance="10"></a-light>
+    </a-entity>
+
+    <!-- Deep green bioluminescent giant jellyfish -->
+    <a-entity jellyfish position="0 -82 -38" class="interactable">
+      <a-sphere radius="2.2" segments-width="10" segments-height="8"
+                material="shader: flat; color: #88ffaa; emissive: #00ff66; emissiveIntensity: 0.8; transparent: true; opacity: 0.45"
+                scale="1 0.5 1"></a-sphere>
+      <a-cylinder radius="1.6" height="4.5" position="0 -2.2 0" open-ended="true"
+                  segments-radial="8" segments-height="1"
+                  material="shader: flat; color: #88ffaa; transparent: true; opacity: 0.12; side: double"></a-cylinder>
+      <a-light type="point" color="#00ff66" intensity="0.35" distance="14"></a-light>
+    </a-entity>
+
+    <!-- ============================================================
+         MARINE LIFE — Sharks
+         ============================================================ -->
+    <!-- Shark 1 — mid-depth -->
+    <a-entity shark-ai="cx: 0; cy: -32; cz: 0; radius: 42; speed: 0.14">
+      <!-- Body nose -->
+      <a-cone radius-bottom="1.3" radius-top="0.08" height="5"
+              segments-radial="6" segments-height="1"
+              material="color: #556670; roughness: 0.9; flatShading: true"
+              rotation="90 0 0" position="0 0 -1.5"></a-cone>
+      <!-- Body rear -->
+      <a-cone radius-bottom="0.05" radius-top="1.3" height="3"
+              segments-radial="6" segments-height="1"
+              material="color: #556670; roughness: 0.9; flatShading: true"
+              rotation="90 0 0" position="0 0 2.5"></a-cone>
+      <!-- Dorsal fin -->
+      <a-box width="0.08" height="1.6" depth="1.2"
+             material="color: #556670; flatShading: true"
+             position="0 1 -0.5" rotation="15 0 0"></a-box>
+      <!-- Tail -->
+      <a-box width="0.06" height="2" depth="0.8"
+             material="color: #556670; flatShading: true"
+             position="0 0.6 3.8" rotation="20 0 0"></a-box>
+      <!-- Pectoral fins -->
+      <a-box width="2.6" height="0.06" depth="1"
+             material="color: #556670; flatShading: true"
+             position="0 -0.6 -1" rotation="0 0 0"></a-box>
+    </a-entity>
+
+    <!-- Shark 2 — deeper, bigger -->
+    <a-entity shark-ai="cx: 10; cy: -60; cz: -20; radius: 50; speed: 0.10">
+      <a-cone radius-bottom="1.8" radius-top="0.1" height="7"
+              segments-radial="6" segments-height="1"
+              material="color: #3d4a52; roughness: 0.9; flatShading: true"
+              rotation="90 0 0" position="0 0 -2"></a-cone>
+      <a-cone radius-bottom="0.05" radius-top="1.8" height="4"
+              segments-radial="6" segments-height="1"
+              material="color: #3d4a52; roughness: 0.9; flatShading: true"
+              rotation="90 0 0" position="0 0 3.5"></a-cone>
+      <a-box width="0.1" height="2.2" depth="1.6"
+             material="color: #3d4a52; flatShading: true"
+             position="0 1.4 -0.5" rotation="18 0 0"></a-box>
+      <a-box width="0.08" height="2.6" depth="1"
+             material="color: #3d4a52; flatShading: true"
+             position="0 0.8 5" rotation="22 0 0"></a-box>
+      <a-box width="3.4" height="0.08" depth="1.3"
+             material="color: #3d4a52; flatShading: true"
+             position="0 -0.8 -1.5"></a-box>
+    </a-entity>
+
+    <!-- ============================================================
+         COLLECTIBLE ITEMS  (treasure, shells, pearls)
+         ============================================================ -->
+    <!-- Treasure chest — mid -->
+    <a-box collectible="points: 25" position="8 -18 -10" width="0.8" height="0.5" depth="0.5"
+           material="color: #c8952e; emissive: #ffd700; emissiveIntensity: 0.35; metalness: 0.6"
+           class="interactable"></a-box>
+
+    <!-- Shell 1 -->
+    <a-sphere collectible="points: 10" position="-12 -35 -5" radius="0.25"
+              material="shader: flat; color: #ffccdd; emissive: #ffaacc; emissiveIntensity: 0.3"
+              class="interactable"></a-sphere>
+
+    <!-- Pearl -->
+    <a-sphere collectible="points: 50" position="5 -55 -22" radius="0.3"
+              material="color: #eef8ff; emissive: #ddeeff; emissiveIntensity: 0.5; metalness: 0.9; roughness: 0.1"
+              class="interactable"></a-sphere>
+
+    <!-- Shell 2 -->
+    <a-sphere collectible="points: 10" position="-20 -70 -30" radius="0.2"
+              material="shader: flat; color: #ffddaa; emissive: #ffcc88; emissiveIntensity: 0.3"
+              class="interactable"></a-sphere>
+
+    <!-- Deep treasure -->
+    <a-box collectible="points: 100" position="12 -90 -40" width="1" height="0.6" depth="0.6"
+           material="color: #ffd700; emissive: #ffaa00; emissiveIntensity: 0.5; metalness: 0.8"
+           class="interactable"></a-box>
+
+    <!-- Gem -->
+    <a-dodecahedron collectible="points: 75" position="-8 -48 -15" radius="0.3"
+                    material="color: #00ffaa; emissive: #00ff88; emissiveIntensity: 0.6; transparent: true; opacity: 0.8"
+                    class="interactable"></a-dodecahedron>
+
+    <!-- ============================================================
+         PLAYER RIG  —  Camera + Controllers + HUD
+         ============================================================ -->
+    <a-entity id="rig" position="0 -2 0"
+              movement-controls="fly: true; speed: 0.35; controls: gamepad, trackpad, keyboard"
+              swim-controls>
+
+      <!-- Camera with look-controls -->
+      <a-entity id="camera" camera look-controls="pointerLockEnabled: false" position="0 1.6 0">
+
+        <!-- ── Vignette ──
+             A ring (torus) that creates a round vignette, NOT a solid plane
+             that blocks the whole view. -->
+        <a-torus id="vignette-ring"
+                 radius="0.65" radius-tubular="0.45"
+                 segments-radial="32" segments-tubular="12"
+                 position="0 0 -0.65"
+                 material="shader: flat; color: #000000; transparent: true; opacity: 0; side: double; depthWrite: false; depthTest: false"
+        ></a-torus>
+
+        <!-- ── HUD: Dive Computer Panel ──
+             Positioned at lower edge of vision, angled for comfort. -->
+        <a-entity id="hud-panel" position="0 -0.42 -0.7" rotation="-22 0 0">
+
+          <!-- Background panel -->
+          <a-plane width="0.72" height="0.28"
+                   material="shader: flat; color: #001525; transparent: true; opacity: 0.82; depthTest: false"
+          ></a-plane>
+
+          <!-- Decorative border -->
+          <a-plane width="0.74" height="0.30" position="0 0 -0.001"
+                   material="shader: flat; color: #00aaff; transparent: true; opacity: 0.12; depthTest: false"
+          ></a-plane>
+
+          <!-- Oxygen visual bar background -->
+          <a-plane width="0.56" height="0.035" position="0 0.07 0.002"
+                   material="shader: flat; color: #0a1a28; depthTest: false"
+          ></a-plane>
+
+          <!-- Oxygen visual bar fill -->
+          <a-plane id="hud-oxy-bar" width="0.54" height="0.025" position="0 0.07 0.003"
+                   material="shader: flat; color: #00e5ff; depthTest: false"
+          ></a-plane>
+
+          <!-- Oxygen text -->
+          <a-text id="hud-oxy-text" value="O₂  100%"
+                  position="-0.32 0.025 0.003"
+                  scale="0.28 0.28 0.28" color="#00e5ff"
+                  font="mozillavr" anchor="left" baseline="center"
+          ></a-text>
+
+          <!-- Depth text -->
+          <a-text id="hud-depth-text" value="▼ 0.0 m"
+                  position="-0.32 -0.03 0.003"
+                  scale="0.3 0.3 0.3" color="#ffffff"
+                  font="mozillavr" anchor="left" baseline="center"
+          ></a-text>
+
+          <!-- Score text -->
+          <a-text id="hud-score-text" value="ITEMS: 0"
+                  position="0.08 -0.03 0.003"
+                  scale="0.24 0.24 0.24" color="#ffd700"
+                  font="mozillavr" anchor="left" baseline="center"
+          ></a-text>
+
+          <!-- Separator line -->
+          <a-plane width="0.56" height="0.003" position="0 -0.005 0.002"
+                   material="shader: flat; color: #00aaff; transparent: true; opacity: 0.3; depthTest: false"
+          ></a-plane>
         </a-entity>
 
-        <!-- MARINE LIFE -->
-        <!-- Layer 1: Surface / Mid-level Fish Schools -->
-        <a-entity schooling-fish="count: 25; radius: 12; center: 0 -10 -15; baseColor: #ffaa00"></a-entity>
-        <a-entity schooling-fish="count: 30; radius: 18; center: 25 -25 -5; baseColor: #00eeff"></a-entity>
-        <a-entity schooling-fish="count: 15; radius: 8; center: -20 -40 -30; baseColor: #ff2255"></a-entity>
+      </a-entity>
 
-        <!-- Layer 2: Deeper glowing jellyfish that player can interact with -->
-        <a-entity jellyfish-anim position="-8 -50 -10" class="interactable" interactive-object>
-            <a-sphere radius="1" color="#88ddff" material="emissive: #00aaff; emissiveIntensity: 0.7; transparent: true; opacity: 0.6; shader: flat" scale="1 0.7 1"></a-sphere>
-            <a-cylinder radius="0.8" height="2.5" position="0 -1.2 0" color="#88ddff" material="transparent: true; opacity: 0.3; shader: flat" open-ended="true"></a-cylinder>
-        </a-entity>
+      <!-- ── Controllers ──
+           oculus-touch-controls gives native Quest button mapping.
+           raycaster on the right hand for interaction / collecting. -->
+      <a-entity id="left-hand"
+                oculus-touch-controls="hand: left"
+                ></a-entity>
 
-        <a-entity jellyfish-anim position="18 -70 -20" class="interactable" interactive-object>
-            <a-sphere radius="1.5" color="#ff88ff" material="emissive: #ff00ff; emissiveIntensity: 0.8; transparent: true; opacity: 0.6; shader: flat" scale="1 0.6 1"></a-sphere>
-            <a-cylinder radius="1.2" height="3" position="0 -1.5 0" color="#ff88ff" material="transparent: true; opacity: 0.3; shader: flat" open-ended="true"></a-cylinder>
-        </a-entity>
+      <a-entity id="right-hand"
+                oculus-touch-controls="hand: right"
+                raycaster="objects: .interactable; far: 8; showLine: true; lineColor: #00ffcc; lineOpacity: 0.35"
+                laser-controls="hand: right; model: false"
+                ></a-entity>
+    </a-entity>
 
-        <a-entity jellyfish-anim position="0 -85 -40" class="interactable" interactive-object>
-            <a-sphere radius="2.5" color="#aaff88" material="emissive: #00ff00; emissiveIntensity: 0.8; transparent: true; opacity: 0.6; shader: flat" scale="1 0.6 1"></a-sphere>
-            <a-cylinder radius="2" height="4.5" position="0 -2.2 0" color="#aaff88" material="transparent: true; opacity: 0.3; shader: flat" open-ended="true"></a-cylinder>
-        </a-entity>
-
-        <!-- Layer 3: Giant slowly circling Shark -->
-        <a-entity animation="property: rotation; to: 0 -360 0; loop: true; dur: 60000; easing: linear" position="0 -35 0">
-            <a-entity position="45 0 0">
-                <!-- Shark body -->
-                <a-cone radius-bottom="1.5" radius-top="0.1" height="6" color="#4a5c6b" rotation="90 0 0" position="0 0 -2"></a-cone>
-                <a-cone radius-bottom="0" radius-top="1.5" height="3" color="#4a5c6b" rotation="90 0 0" position="0 0 2.5"></a-cone>
-                <!-- Fins -->
-                <a-triangle vertex-a="0 0 0" vertex-b="-0.8 1.5 0" vertex-c="0.8 1.5 0" color="#4a5c6b" rotation="0 90 0" position="0 1.2 -1"></a-triangle>
-                <a-triangle vertex-a="0 0 0" vertex-b="-1.5 -1 0" vertex-c="1.5 -1 0" color="#4a5c6b" rotation="0 0 0" position="0 -1 -2"></a-triangle>
-                <!-- Tail fin -->
-                <a-triangle vertex-a="0 0.5 0" vertex-b="0 2 0" vertex-c="0 -2 0" color="#4a5c6b" rotation="0 90 0" position="0 0 4"></a-triangle>
-            </a-entity>
-        </a-entity>
-
-        <!-- USER RIG: Contains Camera, HUD, and Controllers -->
-        <!-- 'fly: true' allows moving in look direction or strafing if head is level -->
-        <a-entity id="rig" position="0 -2 0" movement-controls="fly: true; speed: 0.3" swim-controls>
-            
-            <a-entity id="camera" camera look-controls position="0 1.6 0">
-                
-                <!-- Screen Vignette Overlay (Simulates pressure/depth) -->
-                <a-plane id="vignette" position="0 0 -0.8" width="4" height="4" material="color: #000000; transparent: true; opacity: 0.0; shader: flat" depth-test="false"></a-plane>
-                
-                <!-- Diegetic UI panel mimicking a dive computer -->
-                <a-entity position="0 -0.5 -0.8" rotation="-25 0 0">
-                    <a-plane width="0.75" height="0.25" color="#00152a" material="transparent: true; opacity: 0.8; shader: flat; metalness: 0"></a-plane>
-                    <!-- Oxygen layout -->
-                    <a-plane width="0.6" height="0.02" position="0 0.08 0.01" color="#111"></a-plane>
-                    
-                    <a-text id="oxygen-text" value="OXYGEN: 100%" position="-0.32 0.04 0.02" scale="0.3 0.3 0.3" color="#00d4ff" font="exo2bold"></a-text>
-                    <a-text id="depth-text" value="DEPTH: 0.0m" position="-0.32 -0.04 0.02" scale="0.35 0.35 0.35" color="#ffffff" font="exo2bold"></a-text>
-                </a-entity>
-
-            </a-entity>
-            
-            <!-- Hand Tracked Controllers mapped to Meta Quest touch -->
-            <a-entity id="leftHand" hand-controls="hand: left" laser-controls="hand: left" raycaster="objects: .interactable; far: 10; showLine: true; lineColor: #00ffff; lineOpacity: 0.4"></a-entity>
-            <a-entity id="rightHand" hand-controls="hand: right" laser-controls="hand: right" raycaster="objects: .interactable; far: 10; showLine: true; lineColor: #00ffff; lineOpacity: 0.4"></a-entity>
-            
-        </a-entity>
-
-    </a-scene>
+  </a-scene>
 </body>
 </html>
